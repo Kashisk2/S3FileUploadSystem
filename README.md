@@ -39,75 +39,129 @@ A complete **Node.js + React** file upload system that supports large files (1GB
        │─────────────────▶│
 ```
 
-## Quick Start
+## Prerequisites
 
-### Prerequisites
+Before you begin, ensure you have the following installed:
 
-- Node.js 18+
-- npm or pnpm
-- AWS S3 bucket (or MinIO for local development)
+- **Node.js** 18+ ([Download](https://nodejs.org/))
+- **npm** or **pnpm** (comes with Node.js)
+- **Docker** and **Docker Compose** ([Download](https://www.docker.com/get-started)) - for running PostgreSQL database
+- **AWS S3 bucket** (or MinIO for local development)
+  - AWS Account with S3 access
+  - S3 bucket created
+  - IAM user with S3 permissions
 
-### Installation
+## Step-by-Step Setup Guide
+
+### Step 1: Clone and Install Dependencies
 
 ```bash
+# Navigate to the project directory
 cd S3FileUploadSystem
 
-# Install dependencies
+# Install all dependencies (root + packages)
 npm install
 
 # Or with pnpm
 pnpm install
 ```
 
-### Configuration
+### Step 2: Set Up Database (PostgreSQL)
 
-Create a `.env` file in `packages/server/`:
+The project uses PostgreSQL with Docker Compose for easy local development.
+
+#### 2.1 Start PostgreSQL Database
+
+```bash
+# Start the database container
+docker-compose up -d postgres
+
+# Verify it's running
+docker ps | grep s3-upload-db
+```
+
+The database will be available at:
+
+- **Host**: localhost
+- **Port**: 5432
+- **Database**: s3_uploads
+- **Username**: s3upload
+- **Password**: s3upload123
+- **Connection String**: `postgresql://s3upload:s3upload123@localhost:5432/s3_uploads`
+
+#### 2.2 Initialize Database Schema
+
+```bash
+# Navigate to server directory
+cd packages/server
+
+# Generate Prisma client
+npm run db:generate
+
+# Push schema to database (creates tables)
+npm run db:push
+
+# Optional: View database in Prisma Studio (GUI)
+npm run db:studio
+# Opens at http://localhost:5555
+```
+
+**Database Tables Created:**
+
+- `file_assets` - Stores file metadata and asset information
+- `upload_sessions` - Tracks multipart upload progress
+
+### Step 3: Configure Server Environment Variables
+
+Create a `.env` file in `packages/server/` directory:
+
+```bash
+cd packages/server
+touch .env
+```
+
+Add the following configuration to `packages/server/.env`:
 
 ```env
-# AWS S3 Configuration
+# ============================================
+# AWS S3 Configuration (REQUIRED)
+# ============================================
 AWS_ACCESS_KEY_ID=your_access_key_id
 AWS_SECRET_ACCESS_KEY=your_secret_access_key
 AWS_REGION=us-east-1
 AWS_S3_BUCKET_NAME=your-bucket-name
 
 # Optional: For MinIO or custom S3-compatible storage
+# Uncomment and configure if using MinIO
 # AWS_S3_ENDPOINT_URL=http://localhost:9000
 
-# Database Configuration (PostgreSQL)
-DATABASE_URL=postgresql://user:password@localhost:5432/s3_uploads
+# ============================================
+# Database Configuration (REQUIRED)
+# ============================================
+DATABASE_URL=postgresql://s3upload:s3upload123@localhost:5432/s3_uploads
 
-# Server Configuration
+# ============================================
+# Server Configuration (OPTIONAL)
+# ============================================
 PORT=4000
 CORS_ORIGIN=http://localhost:3000
 
-# Upload Configuration
-MAX_FILE_SIZE=5368709120  # 5GB in bytes
-CHUNK_SIZE=104857600       # 100MB in bytes (minimum 5MB for S3)
+# ============================================
+# Upload Configuration (OPTIONAL)
+# ============================================
+MAX_FILE_SIZE=5368709120   # 5GB in bytes (default)
+CHUNK_SIZE=104857600        # 100MB in bytes (default, minimum 5MB for S3)
 ```
 
-### Database Setup (Optional but recommended)
+**Important:** Replace the AWS credentials and bucket name with your actual values.
 
-The system uses PostgreSQL with Prisma for asset management:
+### Step 4: Configure S3 Bucket CORS
 
-```bash
-cd packages/server
+To allow direct uploads from the browser to S3, configure CORS on your S3 bucket:
 
-# Generate Prisma client
-npm run db:generate
-
-# Push schema to database
-npm run db:push
-
-# Or run migrations
-npm run db:migrate
-
-# Open Prisma Studio to view data
-npm run db:studio
-```
-
-### S3 Bucket CORS Configuration
-
-Add this CORS configuration to your S3 bucket:
+1. Go to your S3 bucket in AWS Console
+2. Navigate to **Permissions** → **CORS**
+3. Add the following CORS configuration:
 
 ```json
 [
@@ -121,16 +175,108 @@ Add this CORS configuration to your S3 bucket:
 ]
 ```
 
-### Running the Application
+**Note:** For production, replace `http://localhost:3000` with your actual frontend URL.
+
+### Step 5: Verify Setup
+
+#### 5.1 Verify Database Connection
 
 ```bash
-# Run both server and client
+# Check if database container is running
+docker ps | grep s3-upload-db
+
+# View database logs
+docker-compose logs postgres
+
+# Test database connection (from server directory)
+cd packages/server
+npm run db:studio
+# Should open Prisma Studio at http://localhost:5555
+```
+
+#### 5.2 Verify Server Configuration
+
+```bash
+# From root directory, test server startup
+cd packages/server
 npm run dev
 
-# Or run separately
-npm run dev:server  # Server on http://localhost:4000
-npm run dev:client  # Client on http://localhost:3000
+# Should start without errors
+# Press Ctrl+C to stop
 ```
+
+### Step 6: Run the Application
+
+#### Option A: Run Both Server and Client Together
+
+```bash
+# From root directory
+npm run dev
+```
+
+This will start:
+
+- **Server**: http://localhost:4000
+- **Client**: http://localhost:3000
+
+#### Option B: Run Separately
+
+```bash
+# Terminal 1: Start server
+npm run dev:server
+# Server runs on http://localhost:4000
+
+# Terminal 2: Start client
+npm run dev:client
+# Client runs on http://localhost:3000
+```
+
+### Step 7: Access the Application
+
+- **Frontend (Client)**: http://localhost:3000
+- **Backend API**: http://localhost:4000
+- **Prisma Studio** (Database GUI): http://localhost:5555 (run `cd packages/server && npm run db:studio`)
+
+## Using MinIO for Local Development (Optional)
+
+If you don't want to use AWS S3, you can use MinIO (S3-compatible storage) locally:
+
+### Step 1: Start MinIO with Docker
+
+```bash
+docker run -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+```
+
+MinIO Console: http://localhost:9001 (login with minioadmin/minioadmin)
+
+### Step 2: Create a Bucket
+
+1. Open MinIO Console at http://localhost:9001
+2. Create a bucket named `uploads` (or any name you prefer)
+
+### Step 3: Update Server .env
+
+```env
+AWS_ACCESS_KEY_ID=minioadmin
+AWS_SECRET_ACCESS_KEY=minioadmin
+AWS_S3_BUCKET_NAME=uploads
+AWS_S3_ENDPOINT_URL=http://localhost:9000
+AWS_REGION=us-east-1
+```
+
+### Step 4: Configure MinIO CORS
+
+In MinIO Console:
+
+1. Go to **Settings** → **CORS**
+2. Add CORS rule:
+   - Allowed Origins: `http://localhost:3000`
+   - Allowed Methods: `GET, PUT, POST, DELETE, HEAD`
+   - Allowed Headers: `*`
+   - Expose Headers: `ETag`
 
 ## API Endpoints
 
@@ -194,6 +340,7 @@ GET /api/assets?entityType=ATTACHMENT&workspaceId=xxx&projectId=xxx&page=1&limit
 ```
 S3FileUploadSystem/
 ├── package.json              # Root package.json
+├── docker-compose.yml        # PostgreSQL database setup
 ├── packages/
 │   ├── server/               # Node.js backend
 │   │   ├── src/
@@ -203,6 +350,9 @@ S3FileUploadSystem/
 │   │   │   ├── stores/       # Upload state management
 │   │   │   ├── types/        # TypeScript types
 │   │   │   └── index.ts      # Entry point
+│   │   ├── prisma/
+│   │   │   └── schema.prisma # Database schema
+│   │   ├── .env              # Server environment variables
 │   │   └── package.json
 │   └── client/               # React frontend
 │       ├── src/
@@ -232,42 +382,159 @@ S3FileUploadSystem/
 | --------------- | -------------- | ----------------------------------- |
 | `MAX_FILE_SIZE` | 5GB            | Maximum file size allowed           |
 | `CHUNK_SIZE`    | 100MB          | Size of each chunk (min 5MB for S3) |
+| `PORT`          | 4000           | Server port                         |
 | `CORS_ORIGIN`   | localhost:3000 | Allowed CORS origins                |
 
-## Using with MinIO (Local Development)
-
-MinIO is an S3-compatible object storage that you can run locally:
+## Database Management Commands
 
 ```bash
-# Run MinIO with Docker
-docker run -p 9000:9000 -p 9001:9001 \
-  -e MINIO_ROOT_USER=minioadmin \
-  -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio server /data --console-address ":9001"
-```
+# Start database
+docker-compose up -d postgres
 
-Update `.env`:
+# Stop database
+docker-compose down
 
-```env
-AWS_ACCESS_KEY_ID=minioadmin
-AWS_SECRET_ACCESS_KEY=minioadmin
-AWS_S3_BUCKET_NAME=uploads
-AWS_S3_ENDPOINT_URL=http://localhost:9000
+# View database logs
+docker-compose logs postgres
+
+# View database in Prisma Studio (GUI)
+cd packages/server && npm run db:studio
+
+# Push schema changes
+cd packages/server && npm run db:push
+
+# Generate Prisma client
+cd packages/server && npm run db:generate
+
+# Run migrations (alternative to db:push)
+cd packages/server && npm run db:migrate
+
+# Access database via psql
+docker exec -it s3-upload-db psql -U s3upload -d s3_uploads
+
+# Reset database (⚠️ deletes all data)
+docker-compose down -v
+docker-compose up -d postgres
+sleep 5
+cd packages/server && npm run db:push
 ```
 
 ## Troubleshooting
 
-### CORS Errors
+### Database Issues
 
-Make sure your S3 bucket has the correct CORS configuration with `ExposeHeaders: ["ETag"]`.
+#### Database not starting?
 
-### ETag Missing
+```bash
+# Check if container is running
+docker ps | grep s3-upload-db
 
-S3 must expose the ETag header for multipart uploads to work. Check CORS configuration.
+# View logs
+docker-compose logs postgres
 
-### Upload Timeout
+# Restart database
+docker-compose restart postgres
 
-For very large files, you may need to increase chunk size or add retry logic.
+# Check if port 5432 is available
+lsof -i :5432
+```
+
+#### Connection refused?
+
+- Make sure Docker is running
+- Check if port 5432 is available
+- Verify the container is running: `docker ps`
+- Check database logs: `docker-compose logs postgres`
+
+#### Reset database
+
+```bash
+# Stop and remove container + data
+docker-compose down -v
+
+# Start fresh
+docker-compose up -d postgres
+sleep 5
+cd packages/server && npm run db:push
+```
+
+### Server Issues
+
+#### Missing environment variables error?
+
+Make sure `packages/server/.env` exists and contains:
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_S3_BUCKET_NAME`
+- `DATABASE_URL`
+
+#### Port already in use?
+
+Change the `PORT` in `packages/server/.env` or stop the process using port 4000.
+
+### S3/CORS Issues
+
+#### CORS Errors
+
+- Make sure your S3 bucket has the correct CORS configuration
+- Ensure `ExposeHeaders: ["ETag"]` is included
+- Verify `AllowedOrigins` includes your frontend URL (http://localhost:3000 for local dev)
+
+#### ETag Missing
+
+S3 must expose the ETag header for multipart uploads to work. Check CORS configuration includes:
+
+```json
+"ExposeHeaders": ["ETag"]
+```
+
+#### Upload Timeout
+
+For very large files, you may need to:
+
+- Increase chunk size in `.env`: `CHUNK_SIZE=209715200` (200MB)
+- Add retry logic (future enhancement)
+
+### Client Issues
+
+#### Client not connecting to server?
+
+- Verify server is running on port 4000
+- Check `vite.config.ts` proxy configuration
+- Check browser console for errors
+
+#### Build errors?
+
+```bash
+# Clear node_modules and reinstall
+rm -rf node_modules packages/*/node_modules
+npm install
+```
+
+## Development Workflow
+
+1. **Start Database**: `docker-compose up -d postgres`
+2. **Start Server**: `npm run dev:server` (or `npm run dev` for both)
+3. **Start Client**: `npm run dev:client` (or `npm run dev` for both)
+4. **View Database**: `cd packages/server && npm run db:studio`
+
+## Production Deployment
+
+For production deployment:
+
+1. Set up production PostgreSQL database
+2. Update `DATABASE_URL` in server `.env`
+3. Configure production S3 bucket with proper CORS
+4. Update `CORS_ORIGIN` to production frontend URL
+5. Build the application:
+   ```bash
+   npm run build
+   ```
+6. Start the server:
+   ```bash
+   npm run start
+   ```
 
 ## License
 
