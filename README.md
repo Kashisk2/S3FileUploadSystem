@@ -2,6 +2,8 @@
 
 A complete **Node.js + React** file upload system that supports large files (1GB+) using **AWS S3 Multipart Upload**.
 
+> 📖 **For detailed architecture and how everything works, see [ARCHITECTURE.md](./ARCHITECTURE.md)**
+
 ## Features
 
 - ✅ **Multipart Upload** - Handles files larger than 5GB
