@@ -419,6 +419,27 @@ router.get("/resume/:uploadId", async (req: Request, res: Response) => {
 
     const completedParts = (session.completedParts as CompletedPart[]) || [];
 
+    // Use actual S3 parts as source of truth, but also include database parts for reference
+    // Merge them to ensure we have the most complete picture
+    const s3PartMap = new Map(uploadedParts.map((p) => [p.partNumber, p.etag]));
+    const dbPartMap = new Map(
+      completedParts.map((p) => [p.partNumber, p.etag])
+    );
+
+    // Merge: prefer S3 parts (source of truth), fallback to DB parts
+    const mergedCompletedParts: CompletedPart[] = Array.from(
+      new Set([
+        ...uploadedParts.map((p) => p.partNumber),
+        ...completedParts.map((p) => p.partNumber),
+      ])
+    )
+      .map((partNumber) => ({
+        partNumber,
+        etag: s3PartMap.get(partNumber) || dbPartMap.get(partNumber) || "",
+      }))
+      .filter((p) => p.etag) // Only include parts with ETags
+      .sort((a, b) => a.partNumber - b.partNumber);
+
     res.json({
       upload: {
         uploadId: session.uploadId,
@@ -428,9 +449,13 @@ router.get("/resume/:uploadId", async (req: Request, res: Response) => {
         fileType: session.fileType,
         totalChunks: session.totalChunks,
         chunkSize: session.chunkSize,
-        completedParts,
+        completedParts: mergedCompletedParts, // Return merged parts
       },
-      uploadedParts,
+      uploadedParts: uploadedParts.map((p) => ({
+        partNumber: p.partNumber,
+        etag: p.etag,
+        size: p.size,
+      })),
       remainingParts,
       progress: (uploadedParts.length / session.totalChunks) * 100,
     });

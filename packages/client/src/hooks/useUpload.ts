@@ -38,6 +38,7 @@ export const useUpload = (): UseUploadReturn => {
     IncompleteUpload[]
   >([]);
   const uploadServiceRef = useRef<UploadService | null>(null);
+  const activeResumesRef = useRef<Set<string>>(new Set()); // Track active resumes to prevent duplicates
 
   // Load incomplete uploads from database on mount and auto-resume them
   useEffect(() => {
@@ -60,6 +61,15 @@ export const useUpload = (): UseUploadReturn => {
         // Then auto-resume all incomplete uploads in background (like YouTube)
         // Don't await - let them run in parallel
         incomplete.forEach((incompleteUpload) => {
+          // Prevent duplicate resumes for the same upload
+          if (activeResumesRef.current.has(incompleteUpload.uploadId)) {
+            console.log(
+              `Skipping duplicate resume for upload ${incompleteUpload.uploadId}`
+            );
+            return;
+          }
+          activeResumesRef.current.add(incompleteUpload.uploadId);
+
           // Resume in background without blocking
           const uploadService = createUploadService();
           uploadService
@@ -86,8 +96,11 @@ export const useUpload = (): UseUploadReturn => {
               setIncompleteUploads((prev) =>
                 prev.filter((u) => u.uploadId !== incompleteUpload.uploadId)
               );
+              activeResumesRef.current.delete(incompleteUpload.uploadId);
             })
             .catch((error: any) => {
+              // Remove from active resumes on error
+              activeResumesRef.current.delete(incompleteUpload.uploadId);
               const errorMessage = error.message || "";
               // If upload expired or was aborted, remove it from the list
               if (

@@ -294,6 +294,17 @@ export class UploadService {
   private async uploadSingleChunk(partNumber: number): Promise<void> {
     if (!this.state || !this.options) return;
 
+    // Check if this part is already completed (safety check)
+    const isAlreadyCompleted = this.state.completedParts.some(
+      (p) => p.partNumber === partNumber
+    );
+    if (isAlreadyCompleted) {
+      console.warn(
+        `[uploadSingleChunk] Part ${partNumber} is already completed, skipping`
+      );
+      return;
+    }
+
     const { file } = this.options;
     const { chunkSize, uploadId, fileKey } = this.state;
 
@@ -301,6 +312,10 @@ export class UploadService {
     const start = (partNumber - 1) * chunkSize;
     const end = Math.min(start + chunkSize, file.size);
     const chunk = file.slice(start, end);
+
+    console.log(
+      `[uploadSingleChunk] Uploading part ${partNumber} (bytes ${start}-${end})`
+    );
 
     // Get presigned URL for this part
     const { presignedUrls } = await apiService.getPresignedUrls(
@@ -435,6 +450,21 @@ export class UploadService {
     const resumeInfo = await apiService.getResumeInfo(uploadId);
     const savedState = resumeInfo.upload;
 
+    // Use actual uploaded parts from S3 (source of truth) instead of database
+    // The database might be out of sync, but S3 always has the correct state
+    const actualUploadedParts = resumeInfo.uploadedParts || [];
+    const actualCompletedParts: CompletedPart[] = actualUploadedParts.map(
+      (part) => ({
+        partNumber: part.partNumber,
+        etag: part.etag,
+      })
+    );
+
+    console.log(
+      `[resumeFromDatabase] Resuming upload ${uploadId}: ${actualCompletedParts.length} parts already uploaded from S3`,
+      actualCompletedParts.map((p) => p.partNumber).sort((a, b) => a - b)
+    );
+
     // If file not provided, try to get it from IndexedDB
     let fileToUse = file;
     if (!fileToUse) {
@@ -454,16 +484,20 @@ export class UploadService {
 
     this.options = { file: fileToUse, onProgress };
 
-    // Restore state from database
+    // Calculate uploaded bytes from actual S3 parts
+    const uploadedBytes = actualUploadedParts.reduce(
+      (sum, part) => sum + (part.size || savedState.chunkSize),
+      0
+    );
+
+    // Restore state using actual S3 parts (source of truth)
     this.state = {
       uploadId: uploadId,
       fileKey: savedState.fileKey,
       totalChunks: savedState.totalChunks,
       chunkSize: savedState.chunkSize,
-      completedParts: savedState.completedParts || [],
-      uploadedBytes: savedState.completedParts
-        ? savedState.completedParts.length * savedState.chunkSize
-        : 0,
+      completedParts: actualCompletedParts, // Use actual S3 parts
+      uploadedBytes: Math.min(uploadedBytes, savedState.fileSize), // Ensure we don't exceed file size
       startTime: Date.now(), // Reset start time
       isPaused: false,
       isAborted: false,
@@ -473,20 +507,53 @@ export class UploadService {
       inProgressChunks: new Map(), // Reset in-progress chunks on resume
     };
 
-    // Get remaining part numbers to upload
-    const uploadedPartNumbers = savedState.completedParts.map(
-      (p) => p.partNumber
+    // Get remaining part numbers to upload using actual S3 parts
+    const uploadedPartNumbers = new Set(
+      actualCompletedParts.map((p) => p.partNumber)
     );
     const allPartNumbers = Array.from(
       { length: savedState.totalChunks },
       (_, i) => i + 1
     );
     const remainingParts = allPartNumbers.filter(
-      (p) => !uploadedPartNumbers.includes(p)
+      (p) => !uploadedPartNumbers.has(p)
     );
 
-    if (remainingParts.length === 0) {
+    console.log(
+      `[resumeFromDatabase] Remaining parts to upload: ${remainingParts.length} of ${savedState.totalChunks}`
+    );
+
+    // Use remainingParts from API response (calculated from actual S3 state)
+    const remainingPartsFromAPI = resumeInfo.remainingParts || remainingParts;
+
+    console.log(
+      `[resumeFromDatabase] Using ${remainingPartsFromAPI.length} remaining parts from API (S3 verified):`,
+      remainingPartsFromAPI.sort((a, b) => a - b)
+    );
+
+    // Validate that we're not trying to upload parts that are already completed
+    const completedPartNumbers = new Set(
+      actualCompletedParts.map((p) => p.partNumber)
+    );
+    const invalidParts = remainingPartsFromAPI.filter((p) =>
+      completedPartNumbers.has(p)
+    );
+    if (invalidParts.length > 0) {
+      console.warn(
+        `[resumeFromDatabase] Warning: Remaining parts include already completed parts: ${invalidParts.join(
+          ", "
+        )}. Filtering them out.`
+      );
+    }
+    const validRemainingParts = remainingPartsFromAPI.filter(
+      (p) => !completedPartNumbers.has(p)
+    );
+
+    if (validRemainingParts.length === 0) {
       // All parts uploaded, just complete the upload
+      console.log(
+        `[resumeFromDatabase] All parts uploaded, completing upload...`
+      );
       let completeResponse;
       try {
         completeResponse = await apiService.completeUpload(
@@ -531,8 +598,12 @@ export class UploadService {
       // Notify progress
       this.notifyProgress("uploading");
 
-      // Upload remaining chunks
-      await this.uploadChunksWithConcurrency(remainingParts, 3);
+      // Upload remaining chunks (use validated remaining parts)
+      console.log(
+        `[resumeFromDatabase] Starting upload of ${validRemainingParts.length} remaining parts:`,
+        validRemainingParts.sort((a, b) => a - b)
+      );
+      await this.uploadChunksWithConcurrency(validRemainingParts, 3);
 
       // Check if aborted
       if (this.state.isAborted) {
