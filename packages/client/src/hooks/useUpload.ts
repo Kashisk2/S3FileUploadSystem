@@ -155,7 +155,7 @@ export const useUpload = (): UseUploadReturn => {
             setError(progressData.error);
           }
         },
-        concurrency: 3,
+        concurrency: 3, // Upload one part at a time sequentially
       });
 
       return result;
