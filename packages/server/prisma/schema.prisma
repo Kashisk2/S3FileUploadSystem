@@ -1,0 +1,128 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Entity types for file assets (similar to kaizo)
+enum EntityType {
+  GENERAL
+  USER_AVATAR
+  USER_COVER
+  PROJECT_COVER
+  PROJECT_LOGO
+  WORKSPACE_LOGO
+  ATTACHMENT
+  DOCUMENT
+  IMAGE
+  VIDEO
+  AUDIO
+}
+
+// Upload status
+enum UploadStatus {
+  PENDING
+  UPLOADING
+  COMPLETED
+  FAILED
+  ABORTED
+}
+
+// File Asset model (similar to kaizo's FileAsset)
+model FileAsset {
+  id                String       @id @default(uuid())
+  
+  // File information
+  name              String       // Original filename
+  key               String       @unique // S3 key/path
+  size              BigInt       // File size in bytes
+  mimeType          String       // MIME type
+  
+  // S3 metadata
+  bucket            String       // S3 bucket name
+  etag              String?      // S3 ETag
+  storageMetadata   Json?        // Additional S3 metadata
+  
+  // Entity relationships (flexible - can be linked to any entity)
+  entityType        EntityType   @default(GENERAL)
+  entityId          String?      // ID of the related entity
+  
+  // Organization
+  workspaceId       String?
+  projectId         String?
+  userId            String?      // Who uploaded this file
+  
+  // Multipart upload tracking
+  uploadId          String?      // S3 multipart upload ID
+  uploadStatus      UploadStatus @default(PENDING)
+  totalChunks       Int          @default(0)
+  completedChunks   Int          @default(0)
+  
+  // Attributes (flexible JSON for additional data)
+  attributes        Json         @default("{}")
+  
+  // Soft delete & archive
+  isDeleted         Boolean      @default(false)
+  isArchived        Boolean      @default(false)
+  deletedAt         DateTime?
+  
+  // External integrations
+  externalId        String?
+  externalSource    String?
+  
+  // Timestamps
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@index([entityType, entityId])
+  @@index([workspaceId])
+  @@index([projectId])
+  @@index([userId])
+  @@index([uploadStatus])
+  @@index([isDeleted])
+  @@map("file_assets")
+}
+
+// Upload session for tracking multipart uploads
+model UploadSession {
+  id              String       @id @default(uuid())
+  
+  // S3 multipart upload info
+  uploadId        String       @unique // S3 upload ID
+  fileKey         String       // S3 key
+  bucket          String       // S3 bucket
+  
+  // File info
+  fileName        String
+  fileSize        BigInt
+  fileType        String
+  chunkSize       Int
+  totalChunks     Int
+  
+  // Progress tracking
+  completedParts  Json         @default("[]") // Array of {partNumber, etag}
+  status          UploadStatus @default(PENDING)
+  
+  // Entity relationships
+  entityType      EntityType   @default(GENERAL)
+  entityId        String?
+  workspaceId     String?
+  projectId       String?
+  userId          String?
+  
+  // Timestamps
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  expiresAt       DateTime?    // When this upload session expires
+
+  @@index([uploadId])
+  @@index([status])
+  @@index([userId])
+  @@map("upload_sessions")
+}
