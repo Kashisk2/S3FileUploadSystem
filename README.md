@@ -86,8 +86,10 @@ The database will be available at:
 - **Port**: 5432
 - **Database**: s3_uploads
 - **Username**: s3upload
-- **Password**: s3upload123
+- **Password**: s3upload123 (⚠️ **Development default** - change for production!)
 - **Connection String**: `postgresql://s3upload:s3upload123@localhost:5432/s3_uploads`
+
+> **⚠️ Security Note**: The database credentials above are **development defaults** from `docker-compose.yml`. For production or shared environments, change these credentials in `docker-compose.yml` and update your `.env` file accordingly.
 
 #### 2.2 Initialize Database Schema
 
@@ -138,6 +140,7 @@ AWS_S3_BUCKET_NAME=your-bucket-name
 # ============================================
 # Database Configuration (REQUIRED)
 # ============================================
+# ⚠️ Development default - change password for production!
 DATABASE_URL=postgresql://s3upload:s3upload123@localhost:5432/s3_uploads
 
 # ============================================
@@ -153,7 +156,11 @@ MAX_FILE_SIZE=5368709120   # 5GB in bytes (default)
 CHUNK_SIZE=104857600        # 100MB in bytes (default, minimum 5MB for S3)
 ```
 
-**Important:** Replace the AWS credentials and bucket name with your actual values.
+**⚠️ Security Important:**
+- Replace the AWS credentials (`your_access_key_id`, `your_secret_access_key`) with your **actual** AWS credentials
+- Replace `your-bucket-name` with your actual S3 bucket name
+- The database password (`s3upload123`) is a development default - **change it for production**
+- **Never commit** your `.env` file to version control - it should be in `.gitignore`
 
 ### Step 4: Configure S3 Bucket CORS
 
@@ -252,6 +259,8 @@ docker run -p 9000:9000 -p 9001:9001 \
 
 MinIO Console: http://localhost:9001 (login with minioadmin/minioadmin)
 
+> **⚠️ Note**: `minioadmin/minioadmin` are default MinIO credentials for local development only. Change them for any shared or production environment.
+
 ### Step 2: Create a Bucket
 
 1. Open MinIO Console at http://localhost:9001
@@ -260,6 +269,7 @@ MinIO Console: http://localhost:9001 (login with minioadmin/minioadmin)
 ### Step 3: Update Server .env
 
 ```env
+# ⚠️ These are MinIO default credentials - change for production!
 AWS_ACCESS_KEY_ID=minioadmin
 AWS_SECRET_ACCESS_KEY=minioadmin
 AWS_S3_BUCKET_NAME=uploads
