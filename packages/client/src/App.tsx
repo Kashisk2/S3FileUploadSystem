@@ -216,16 +216,6 @@ const App: React.FC = () => {
                         <div className="flex gap-1">
                           <button
                             onClick={() =>
-                              handleResumeUpload(incomplete.uploadId)
-                            }
-                            disabled={isUploading}
-                            className="px-3 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-                            title="Resume upload automatically"
-                          >
-                            Resume
-                          </button>
-                          <button
-                            onClick={() =>
                               clearIncompleteUpload(incomplete.uploadId)
                             }
                             disabled={isUploading}

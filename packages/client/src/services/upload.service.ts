@@ -45,25 +45,25 @@ interface SavedUploadState {
 export class UploadService {
   private state: UploadState | null = null;
   private options: UploadOptions | null = null;
+  private abortController: AbortController | null = null; // For canceling ongoing requests
+  private uploadPromise: Promise<void> | null = null; // Track the main upload promise
 
   /**
    * Save upload progress to database via API
+   * Only saves the newly completed part to avoid duplicate API calls
    */
-  private async saveProgressToDatabase(): Promise<void> {
+  private async saveProgressToDatabase(
+    partNumber: number,
+    etag: string
+  ): Promise<void> {
     if (!this.state) return;
 
-    // Save completed parts to database
-    for (const part of this.state.completedParts) {
-      try {
-        await apiService.markPartCompleted(
-          this.state.uploadId,
-          part.partNumber,
-          part.etag
-        );
-      } catch (error) {
-        // Silently fail - database might not be available
-        console.warn("Failed to save progress to database:", error);
-      }
+    // Only save the newly completed part, not all parts
+    try {
+      await apiService.markPartCompleted(this.state.uploadId, partNumber, etag);
+    } catch (error) {
+      // Silently fail - database might not be available
+      console.warn("Failed to save progress to database:", error);
     }
   }
 
@@ -83,6 +83,9 @@ export class UploadService {
   ): Promise<{ fileUrl: string; fileKey: string }> {
     this.options = options;
     const { file, onProgress, concurrency = 3 } = options;
+
+    // Create new abort controller for this upload
+    this.abortController = new AbortController();
 
     try {
       // Step 1: Initiate the multipart upload
@@ -124,7 +127,12 @@ export class UploadService {
         (_, i) => i + 1
       );
 
-      await this.uploadChunksWithConcurrency(partNumbers, concurrency);
+      // Store the upload promise so we can track it
+      this.uploadPromise = this.uploadChunksWithConcurrency(
+        partNumbers,
+        concurrency
+      );
+      await this.uploadPromise;
 
       // Check if aborted
       if (this.state.isAborted) {
@@ -217,7 +225,18 @@ export class UploadService {
     const inProgress: Promise<void>[] = [];
 
     while (queue.length > 0 || inProgress.length > 0) {
-      // Check if paused or aborted
+      // Check if aborted first
+      if (this.state?.isAborted) {
+        // Cancel all in-progress uploads
+        if (this.abortController) {
+          this.abortController.abort();
+        }
+        // Wait for current uploads to finish (they'll be cancelled)
+        await Promise.allSettled(inProgress);
+        throw new Error("Upload aborted");
+      }
+
+      // Check if paused - wait until resumed
       if (this.state?.isPaused) {
         await new Promise<void>((resolve) => {
           const checkPause = setInterval(() => {
@@ -227,14 +246,23 @@ export class UploadService {
             }
           }, 100);
         });
+        // After pause, check abort again
+        if (this.state?.isAborted) {
+          if (this.abortController) {
+            this.abortController.abort();
+          }
+          await Promise.allSettled(inProgress);
+          throw new Error("Upload aborted");
+        }
       }
 
-      if (this.state?.isAborted) {
-        break;
-      }
-
-      // Start new uploads up to concurrency limit
-      while (queue.length > 0 && inProgress.length < concurrency) {
+      // Start new uploads up to concurrency limit (only if not paused)
+      while (
+        queue.length > 0 &&
+        inProgress.length < concurrency &&
+        !this.state?.isPaused &&
+        !this.state?.isAborted
+      ) {
         const partNumber = queue.shift()!;
         const uploadPromise = this.uploadSingleChunk(partNumber);
         inProgress.push(uploadPromise);
@@ -248,14 +276,17 @@ export class UploadService {
         });
       }
 
-      // Wait for at least one to complete
+      // Wait for at least one to complete (only if there are in-progress uploads)
       if (inProgress.length > 0) {
         await Promise.race(inProgress);
+      } else if (this.state?.isPaused) {
+        // If paused and no in-progress, wait a bit before checking again
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
 
     // Wait for all remaining uploads
-    await Promise.all(inProgress);
+    await Promise.allSettled(inProgress);
   }
 
   /**
@@ -317,6 +348,11 @@ export class UploadService {
       `[uploadSingleChunk] Uploading part ${partNumber} (bytes ${start}-${end})`
     );
 
+    // Check if aborted before starting
+    if (this.state?.isAborted) {
+      throw new Error("Upload aborted");
+    }
+
     // Get presigned URL for this part
     const { presignedUrls } = await apiService.getPresignedUrls(
       uploadId,
@@ -331,12 +367,13 @@ export class UploadService {
     }
 
     // Upload the chunk with real-time progress tracking
+    // Pass abort signal if available
     const etag = await apiService.uploadChunk(
       presignedUrl,
       chunk,
       (progress) => {
         // Update progress for this chunk in real-time
-        if (this.state) {
+        if (this.state && !this.state.isAborted) {
           // Calculate actual bytes uploaded for this chunk
           const chunkBytes = (progress / 100) * chunk.size;
           this.state.inProgressChunks.set(partNumber, chunkBytes);
@@ -347,7 +384,8 @@ export class UploadService {
           // Notify progress frequently for smooth updates
           this.notifyProgress("uploading");
         }
-      }
+      },
+      this.abortController?.signal // Pass abort signal
     );
 
     // Mark part as completed
@@ -364,8 +402,8 @@ export class UploadService {
         this.state.uploadedBytes = file.size;
       }
 
-      // Save progress to database after each chunk completion (async, don't await)
-      this.saveProgressToDatabase().catch((err) => {
+      // Save only the newly completed part to database (async, don't await)
+      this.saveProgressToDatabase(partNumber, etag).catch((err) => {
         console.warn("Failed to save progress to database:", err);
       });
       this.notifyProgress("uploading");
@@ -418,21 +456,24 @@ export class UploadService {
 
   /**
    * Pause the upload
+   * Stops starting new chunks but allows current ones to finish
    */
   pause(): void {
-    if (this.state) {
+    if (this.state && !this.state.isAborted) {
       this.state.isPaused = true;
-      // State is in database, no need to save separately
+      console.log("[pause] Upload paused - no new chunks will start");
       this.notifyProgress("paused");
     }
   }
 
   /**
    * Resume the upload
+   * Continues uploading remaining chunks
    */
   resume(): void {
-    if (this.state) {
+    if (this.state && !this.state.isAborted) {
       this.state.isPaused = false;
+      console.log("[resume] Upload resumed - continuing with remaining chunks");
       this.notifyProgress("uploading");
     }
   }
@@ -446,6 +487,9 @@ export class UploadService {
     file?: File,
     onProgress?: (progress: UploadProgress) => void
   ): Promise<{ fileUrl: string; fileKey: string }> {
+    // Create new abort controller for this resume
+    this.abortController = new AbortController();
+
     // Fetch state from database via API
     const resumeInfo = await apiService.getResumeInfo(uploadId);
     const savedState = resumeInfo.upload;
@@ -603,7 +647,12 @@ export class UploadService {
         `[resumeFromDatabase] Starting upload of ${validRemainingParts.length} remaining parts:`,
         validRemainingParts.sort((a, b) => a - b)
       );
-      await this.uploadChunksWithConcurrency(validRemainingParts, 3);
+      // Store the upload promise so we can track it
+      this.uploadPromise = this.uploadChunksWithConcurrency(
+        validRemainingParts,
+        3
+      );
+      await this.uploadPromise;
 
       // Check if aborted
       if (this.state.isAborted) {
@@ -712,16 +761,26 @@ export class UploadService {
 
   /**
    * Abort the upload
+   * Cancels all in-progress requests and aborts the upload on the server
    */
   async abort(): Promise<void> {
     if (this.state) {
+      console.log("[abort] Aborting upload...");
       this.state.isAborted = true;
       this.state.isPaused = false;
 
+      // Cancel all ongoing axios requests
+      if (this.abortController) {
+        this.abortController.abort();
+        console.log("[abort] Abort signal sent to cancel ongoing requests");
+      }
+
+      // Abort on server
       try {
         await apiService.abortUpload(this.state.uploadId, this.state.fileKey);
+        console.log("[abort] Upload aborted on server");
       } catch (error) {
-        console.error("Failed to abort upload:", error);
+        console.error("Failed to abort upload on server:", error);
       }
 
       // Remove file from IndexedDB on abort

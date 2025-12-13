@@ -258,22 +258,30 @@ export const useUpload = (): UseUploadReturn => {
   }, []);
 
   const abort = useCallback(async () => {
-    await uploadServiceRef.current?.abort();
-    setIsUploading(false);
-    setIsPaused(false);
-    // Reload incomplete uploads from database after abort
     try {
-      const response = await apiService.getIncompleteUploads();
-      const incomplete: IncompleteUpload[] = response.uploads.map((upload) => ({
-        uploadId: upload.uploadId,
-        fileName: upload.fileName,
-        fileSize: upload.fileSize,
-        progress: upload.progress,
-        uploadedBytes: upload.uploadedBytes,
-      }));
-      setIncompleteUploads(incomplete);
-    } catch (err) {
-      console.error("Failed to reload incomplete uploads:", err);
+      await uploadServiceRef.current?.abort();
+    } catch (error) {
+      console.error("Error during abort:", error);
+    } finally {
+      setIsUploading(false);
+      setIsPaused(false);
+      uploadServiceRef.current = null;
+      // Reload incomplete uploads from database after abort
+      try {
+        const response = await apiService.getIncompleteUploads();
+        const incomplete: IncompleteUpload[] = response.uploads.map(
+          (upload) => ({
+            uploadId: upload.uploadId,
+            fileName: upload.fileName,
+            fileSize: upload.fileSize,
+            progress: upload.progress,
+            uploadedBytes: upload.uploadedBytes,
+          })
+        );
+        setIncompleteUploads(incomplete);
+      } catch (err) {
+        console.error("Failed to reload incomplete uploads:", err);
+      }
     }
   }, []);
 

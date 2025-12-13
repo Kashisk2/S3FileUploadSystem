@@ -49,12 +49,14 @@ export const apiService = {
   async uploadChunk(
     presignedUrl: string,
     chunk: Blob,
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void,
+    signal?: AbortSignal
   ): Promise<string> {
     const response = await axios.put(presignedUrl, chunk, {
       headers: {
         "Content-Type": "application/octet-stream",
       },
+      signal, // Pass abort signal to cancel the request
       onUploadProgress: (progressEvent) => {
         if (onProgress && progressEvent.total) {
           const progress = (progressEvent.loaded / progressEvent.total) * 100;
