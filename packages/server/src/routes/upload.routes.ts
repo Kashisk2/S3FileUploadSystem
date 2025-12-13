@@ -4,7 +4,8 @@ import { uploadStore } from "../stores/upload.store";
 import { uploadSessionService } from "../services/upload-session.service";
 import { assetService } from "../services/asset.service";
 import { config } from "../config";
-import { EntityType } from "@prisma/client";
+import { EntityType, UploadStatus } from "@prisma/client";
+import prisma from "../db/prisma";
 import type {
   InitiateUploadRequest,
   CompleteUploadRequest,
@@ -12,6 +13,7 @@ import type {
   GetPresignedUrlsRequest,
   AbortUploadRequest,
 } from "../types";
+import type { CompletedPart } from "../services/upload-session.service";
 
 const router = Router();
 
@@ -147,7 +149,14 @@ router.post("/presigned-urls", async (req: Request, res: Response) => {
       partNumbers
     );
 
-    // Update upload status
+    // Update upload status in database
+    try {
+      await uploadSessionService.updateStatus(uploadId, UploadStatus.UPLOADING);
+    } catch (dbError) {
+      console.warn("Could not update session status in database:", dbError);
+    }
+
+    // Update upload status in memory store
     uploadStore.update(uploadId, { status: "uploading" });
 
     res.json({ presignedUrls });
@@ -211,11 +220,37 @@ router.post("/complete", async (req: Request, res: Response) => {
       }
     }
 
-    const result = await s3Service.completeMultipartUpload(
-      uploadId,
-      fileKey,
-      parts
+    console.log(
+      `[POST /upload/complete] Completing upload ${uploadId} with ${parts.length} parts`
     );
+
+    let result;
+    try {
+      result = await s3Service.completeMultipartUpload(
+        uploadId,
+        fileKey,
+        parts
+      );
+      console.log(
+        `[POST /upload/complete] Successfully completed upload ${uploadId}`
+      );
+    } catch (error: any) {
+      console.error(
+        `[POST /upload/complete] Error in completeMultipartUpload:`,
+        error.message || error
+      );
+      throw error;
+    }
+
+    // Update upload status in database
+    try {
+      await uploadSessionService.updateStatus(uploadId, UploadStatus.COMPLETED);
+      console.log(
+        `[POST /upload/complete] Updated upload status to COMPLETED in database`
+      );
+    } catch (dbError) {
+      console.warn("Could not update session status in database:", dbError);
+    }
 
     // Update upload status in memory store
     uploadStore.update(uploadId, { status: "completed" });
@@ -233,9 +268,24 @@ router.post("/complete", async (req: Request, res: Response) => {
       ...result,
       asset, // Include the created asset in the response
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error completing upload:", error);
-    res.status(500).json({ error: "Failed to complete upload" });
+
+    // Provide more detailed error messages
+    const errorMessage = error.message || "Failed to complete upload";
+    const statusCode =
+      errorMessage.includes("NoSuchUpload") ||
+      errorMessage.includes("does not exist")
+        ? 404
+        : errorMessage.includes("Part") &&
+          errorMessage.includes("does not exist")
+        ? 400
+        : 500;
+
+    res.status(statusCode).json({
+      error: errorMessage,
+      details: error.name || error.Code || "Unknown error",
+    });
   }
 });
 
@@ -287,6 +337,56 @@ router.get("/status/:uploadId", async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/upload/incomplete
+ * Get all incomplete upload sessions from database
+ */
+router.get("/incomplete", async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.query;
+
+    // Get incomplete sessions from database
+    const sessions = await prisma.uploadSession.findMany({
+      where: {
+        status: {
+          in: [UploadStatus.PENDING, UploadStatus.UPLOADING],
+        },
+        expiresAt: {
+          gt: new Date(), // Not expired
+        },
+        ...(userId && { userId: userId as string }),
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const incompleteUploads = sessions.map((session) => {
+      const completedParts = (session.completedParts as CompletedPart[]) || [];
+      const progress = (completedParts.length / session.totalChunks) * 100;
+      const uploadedBytes = completedParts.length * session.chunkSize;
+
+      return {
+        uploadId: session.uploadId,
+        fileKey: session.fileKey,
+        fileName: session.fileName,
+        fileSize: Number(session.fileSize),
+        fileType: session.fileType,
+        totalChunks: session.totalChunks,
+        chunkSize: session.chunkSize,
+        completedParts,
+        uploadedBytes: Math.min(uploadedBytes, Number(session.fileSize)),
+        progress,
+        status: session.status,
+        createdAt: session.createdAt,
+      };
+    });
+
+    res.json({ uploads: incompleteUploads });
+  } catch (error) {
+    console.error("Error getting incomplete uploads:", error);
+    res.status(500).json({ error: "Failed to get incomplete uploads" });
+  }
+});
+
+/**
  * GET /api/upload/resume/:uploadId
  * Get upload status and remaining parts for resume
  */
@@ -294,33 +394,45 @@ router.get("/resume/:uploadId", async (req: Request, res: Response) => {
   try {
     const { uploadId } = req.params;
 
-    const upload = uploadStore.get(uploadId);
+    // Get session from database
+    const session = await uploadSessionService.getSessionByUploadId(uploadId);
 
-    if (!upload) {
-      return res.status(404).json({ error: "Upload not found" });
+    if (!session) {
+      return res.status(404).json({ error: "Upload session not found" });
     }
 
     // Get already uploaded parts from S3
     const uploadedParts = await s3Service.listUploadedParts(
-      upload.uploadId,
-      upload.fileKey
+      session.uploadId,
+      session.fileKey
     );
 
     // Calculate remaining parts
     const uploadedPartNumbers = uploadedParts.map((p) => p.partNumber);
     const allPartNumbers = Array.from(
-      { length: upload.totalChunks },
+      { length: session.totalChunks },
       (_, i) => i + 1
     );
     const remainingParts = allPartNumbers.filter(
       (p) => !uploadedPartNumbers.includes(p)
     );
 
+    const completedParts = (session.completedParts as CompletedPart[]) || [];
+
     res.json({
-      upload,
+      upload: {
+        uploadId: session.uploadId,
+        fileKey: session.fileKey,
+        fileName: session.fileName,
+        fileSize: session.fileSize,
+        fileType: session.fileType,
+        totalChunks: session.totalChunks,
+        chunkSize: session.chunkSize,
+        completedParts,
+      },
       uploadedParts,
       remainingParts,
-      progress: (uploadedParts.length / upload.totalChunks) * 100,
+      progress: (uploadedParts.length / session.totalChunks) * 100,
     });
   } catch (error) {
     console.error("Error getting resume info:", error);

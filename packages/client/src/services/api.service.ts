@@ -5,6 +5,7 @@ import type {
   CompletedPart,
   CompleteUploadResponse,
   ListFilesResponse,
+  ListAssetsResponse,
 } from "../types";
 
 const API_BASE_URL = "/api";
@@ -114,6 +115,47 @@ export const apiService = {
   },
 
   /**
+   * Get all incomplete uploads from database
+   */
+  async getIncompleteUploads(userId?: string): Promise<{
+    uploads: Array<{
+      uploadId: string;
+      fileKey: string;
+      fileName: string;
+      fileSize: number;
+      fileType: string;
+      totalChunks: number;
+      chunkSize: number;
+      completedParts: Array<{ partNumber: number; etag: string }>;
+      uploadedBytes: number;
+      progress: number;
+      status: string;
+      createdAt: string;
+    }>;
+  }> {
+    const params = userId ? `?userId=${userId}` : "";
+    const response = await axios.get(
+      `${API_BASE_URL}/upload/incomplete${params}`
+    );
+    return response.data;
+  },
+
+  /**
+   * Mark a part as completed in database
+   */
+  async markPartCompleted(
+    uploadId: string,
+    partNumber: number,
+    etag: string
+  ): Promise<void> {
+    await axios.post(`${API_BASE_URL}/upload/complete-part`, {
+      uploadId,
+      partNumber,
+      etag,
+    });
+  },
+
+  /**
    * List all files
    */
   async listFiles(
@@ -151,5 +193,57 @@ export const apiService = {
    */
   async deleteFile(fileKey: string): Promise<void> {
     await axios.delete(`${API_BASE_URL}/files/${encodeURIComponent(fileKey)}`);
+  },
+
+  /**
+   * List all assets from database
+   */
+  async listAssets(params?: {
+    page?: number;
+    limit?: number;
+    search?: string;
+    entityType?: string;
+    workspaceId?: string;
+    projectId?: string;
+    userId?: string;
+    isDeleted?: boolean;
+  }): Promise<ListAssetsResponse> {
+    const queryParams = new URLSearchParams();
+    if (params?.page) queryParams.append("page", params.page.toString());
+    if (params?.limit) queryParams.append("limit", params.limit.toString());
+    if (params?.search) queryParams.append("search", params.search);
+    if (params?.entityType) queryParams.append("entityType", params.entityType);
+    if (params?.workspaceId)
+      queryParams.append("workspaceId", params.workspaceId);
+    if (params?.projectId) queryParams.append("projectId", params.projectId);
+    if (params?.userId) queryParams.append("userId", params.userId);
+    if (params?.isDeleted !== undefined)
+      queryParams.append("isDeleted", params.isDeleted.toString());
+
+    const response = await axios.get(
+      `${API_BASE_URL}/assets?${queryParams.toString()}`
+    );
+    return response.data;
+  },
+
+  /**
+   * Get download URL for an asset
+   */
+  async getAssetDownloadUrl(
+    assetId: string,
+    disposition: "inline" | "attachment" = "attachment"
+  ): Promise<{ downloadUrl: string }> {
+    const response = await axios.get(
+      `${API_BASE_URL}/assets/${assetId}/download?disposition=${disposition}`
+    );
+    return response.data;
+  },
+
+  /**
+   * Delete an asset (soft delete by default)
+   */
+  async deleteAsset(assetId: string, hard: boolean = false): Promise<void> {
+    const url = `${API_BASE_URL}/assets/${assetId}${hard ? "?hard=true" : ""}`;
+    await axios.delete(url);
   },
 };

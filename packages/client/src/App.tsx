@@ -2,17 +2,27 @@ import React, { useState, useCallback, useRef } from "react";
 import { Cloud, HardDrive } from "lucide-react";
 import { FileDropzone } from "./components/FileDropzone";
 import { UploadProgress } from "./components/UploadProgress";
-import { FileList } from "./components/FileList";
+import { FileList, type FileListRef } from "./components/FileList";
 import { useUpload } from "./hooks/useUpload";
 import type { UploadProgress as UploadProgressType } from "./types";
 
 const App: React.FC = () => {
-  const { uploadFile, pause, resume, abort, progress, isUploading, isPaused } =
-    useUpload();
+  const {
+    uploadFile,
+    resumeUpload,
+    pause,
+    resume,
+    abort,
+    progress,
+    isUploading,
+    isPaused,
+    incompleteUploads,
+    clearIncompleteUpload,
+  } = useUpload();
   const [completedUploads, setCompletedUploads] = useState<
     UploadProgressType[]
   >([]);
-  const fileListRef = useRef<{ refresh: () => void } | null>(null);
+  const fileListRef = useRef<FileListRef | null>(null);
 
   const handleFileSelect = useCallback(
     async (file: File) => {
@@ -44,6 +54,25 @@ const App: React.FC = () => {
   const handleRefresh = useCallback(() => {
     // Clear completed uploads when file list refreshes
   }, []);
+
+  const handleResumeUpload = useCallback(
+    async (uploadId: string) => {
+      try {
+        // Resume without requiring file selection - file is retrieved from IndexedDB
+        await resumeUpload(uploadId);
+        // Refresh file list after successful resume
+        if (fileListRef.current?.refresh) {
+          fileListRef.current.refresh();
+        }
+      } catch (error) {
+        console.error("Failed to resume upload:", error);
+        alert(
+          "Failed to resume upload. The file may have been removed from browser storage."
+        );
+      }
+    },
+    [resumeUpload]
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
@@ -143,6 +172,76 @@ const App: React.FC = () => {
               </div>
             )}
 
+            {/* Incomplete Uploads */}
+            {incompleteUploads.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-medium text-gray-700">
+                    Incomplete Uploads
+                  </h3>
+                  <span className="text-xs text-gray-500">
+                    {incompleteUploads.length} pending
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {incompleteUploads.map((incomplete) => (
+                    <div
+                      key={incomplete.uploadId}
+                      className="bg-yellow-50 border border-yellow-200 rounded-lg p-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {incomplete.fileName}
+                          </p>
+                          <div className="flex items-center gap-2 mt-1">
+                            <div className="flex-1 bg-gray-200 rounded-full h-2 overflow-hidden">
+                              <div
+                                className="bg-yellow-500 h-full transition-all"
+                                style={{ width: `${incomplete.progress}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-gray-600 whitespace-nowrap">
+                              {Math.round(incomplete.progress)}%
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {(incomplete.uploadedBytes / 1024 / 1024).toFixed(
+                              1
+                            )}{" "}
+                            MB /{" "}
+                            {(incomplete.fileSize / 1024 / 1024).toFixed(1)} MB
+                          </p>
+                        </div>
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() =>
+                              handleResumeUpload(incomplete.uploadId)
+                            }
+                            disabled={isUploading}
+                            className="px-3 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                            title="Resume upload automatically"
+                          >
+                            Resume
+                          </button>
+                          <button
+                            onClick={() =>
+                              clearIncompleteUpload(incomplete.uploadId)
+                            }
+                            disabled={isUploading}
+                            className="px-2 py-1 text-xs text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded disabled:opacity-50"
+                            title="Remove from list"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Completed Uploads */}
             {completedUploads.length > 0 && (
               <div>
@@ -174,7 +273,7 @@ const App: React.FC = () => {
 
           {/* Right Column - File List */}
           <div>
-            <FileList onRefresh={handleRefresh} />
+            <FileList onRefresh={handleRefresh} ref={fileListRef} />
           </div>
         </div>
 

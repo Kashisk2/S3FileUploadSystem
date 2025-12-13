@@ -63,3 +63,33 @@ export interface ListFilesResponse {
   files: FileItem[];
   nextContinuationToken?: string;
 }
+
+// Asset types (from database)
+export interface Asset {
+  id: string;
+  name: string;
+  key: string;
+  size: number;
+  mimeType: string;
+  bucket: string;
+  etag?: string;
+  entityType: string;
+  entityId?: string;
+  workspaceId?: string;
+  projectId?: string;
+  userId?: string;
+  uploadStatus: string;
+  createdAt: string;
+  updatedAt: string;
+  assetUrl?: string;
+}
+
+export interface ListAssetsResponse {
+  assets: Asset[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}

@@ -157,6 +157,7 @@ CHUNK_SIZE=104857600        # 100MB in bytes (default, minimum 5MB for S3)
 ```
 
 **⚠️ Security Important:**
+
 - Replace the AWS credentials (`your_access_key_id`, `your_secret_access_key`) with your **actual** AWS credentials
 - Replace `your-bucket-name` with your actual S3 bucket name
 - The database password (`s3upload123`) is a development default - **change it for production**
@@ -545,6 +546,63 @@ For production deployment:
    ```bash
    npm run start
    ```
+
+## Security Best Practices
+
+### ⚠️ Important Security Notes
+
+1. **Environment Variables**
+
+   - **Never commit** `.env` files to version control (already in `.gitignore`)
+   - Use strong, unique passwords for production databases
+   - Rotate AWS credentials regularly
+   - Use IAM roles with least privilege for S3 access
+
+2. **Development vs Production**
+
+   - The credentials shown in this README are **development defaults only**:
+     - Database password: `s3upload123` (change in `docker-compose.yml` for production)
+     - MinIO credentials: `minioadmin/minioadmin` (change for shared/production environments)
+   - **Always change default credentials** before deploying to production
+
+3. **AWS S3 Security**
+
+   - Use IAM users with minimal required permissions
+   - Enable S3 bucket versioning and logging
+   - Configure bucket policies to restrict access
+   - Use presigned URLs with appropriate expiration times
+
+4. **Database Security**
+
+   - Change default PostgreSQL credentials in `docker-compose.yml` for production
+   - Use strong passwords (minimum 16 characters, mixed case, numbers, symbols)
+   - Restrict database access to application servers only
+   - Enable SSL/TLS for database connections in production
+
+5. **CORS Configuration**
+
+   - Only allow specific origins, not `*` in production
+   - Update `AllowedOrigins` in S3 CORS to match your production frontend URL
+   - Regularly review and update CORS policies
+
+6. **File Upload Security**
+   - Validate file types and sizes on both client and server
+   - Scan uploaded files for malware (consider AWS Lambda + ClamAV)
+   - Store sensitive files with encryption at rest
+   - Implement rate limiting on upload endpoints
+
+### Checklist Before Production
+
+- [ ] Changed all default passwords and credentials
+- [ ] Updated `DATABASE_URL` with production database
+- [ ] Configured production S3 bucket with proper CORS
+- [ ] Updated `CORS_ORIGIN` to production frontend URL
+- [ ] Verified `.env` files are in `.gitignore` and not committed
+- [ ] Set up proper IAM roles and policies for S3
+- [ ] Enabled database SSL/TLS connections
+- [ ] Configured proper logging and monitoring
+- [ ] Set up backup strategy for database
+- [ ] Implemented rate limiting and DDoS protection
 
 ## License
 

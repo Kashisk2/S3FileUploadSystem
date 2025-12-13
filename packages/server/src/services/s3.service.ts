@@ -32,6 +32,9 @@ class S3Service {
         accessKeyId: config.aws.accessKeyId,
         secretAccessKey: config.aws.secretAccessKey,
       },
+      requestHandler: {
+        requestTimeout: 10000, // 10 seconds timeout
+      },
     };
 
     // For MinIO or custom S3-compatible storage
@@ -144,28 +147,240 @@ class S3Service {
 
   /**
    * Complete multipart upload
+   * Verifies parts exist in S3 before completing
    */
   async completeMultipartUpload(
     uploadId: string,
     fileKey: string,
     parts: CompletedPart[]
   ): Promise<CompleteUploadResponse> {
-    // Sort parts by part number
-    const sortedParts = [...parts].sort((a, b) => a.partNumber - b.partNumber);
+    console.log(
+      `[completeMultipartUpload] Starting completion for uploadId: ${uploadId}, fileKey: ${fileKey}, parts: ${parts.length}`
+    );
+
+    // First, verify the upload exists and get actual uploaded parts from S3
+    let actualUploadedParts: {
+      partNumber: number;
+      etag: string;
+      size: number;
+    }[];
+    try {
+      console.log(
+        `[completeMultipartUpload] Attempting to list uploaded parts for uploadId: ${uploadId}`
+      );
+      // Add timeout wrapper to prevent hanging
+      const listPartsPromise = this.listUploadedParts(uploadId, fileKey);
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(
+          () => reject(new Error("ListParts timeout after 15 seconds")),
+          15000
+        );
+      });
+
+      actualUploadedParts = (await Promise.race([
+        listPartsPromise,
+        timeoutPromise,
+      ])) as typeof actualUploadedParts;
+      console.log(
+        `[completeMultipartUpload] Successfully listed ${actualUploadedParts.length} parts from S3`
+      );
+    } catch (error: any) {
+      console.log(
+        `[completeMultipartUpload] Error listing parts:`,
+        error.name || error.Code || error.message
+      );
+      // If upload doesn't exist, it might already be completed
+      const isNoSuchUpload =
+        error.name === "NoSuchUpload" ||
+        error.Code === "NoSuchUpload" ||
+        error.message?.includes("NoSuchUpload") ||
+        (error.$metadata && error.$metadata.httpStatusCode === 404);
+
+      if (isNoSuchUpload) {
+        console.log(
+          `Upload ${uploadId} not found in S3 (NoSuchUpload), checking if file already exists...`
+        );
+        // Check if file already exists (upload was already completed)
+        try {
+          const headResponse = await this.client.send(
+            new HeadObjectCommand({
+              Bucket: this.bucket,
+              Key: fileKey,
+            })
+          );
+          // File exists, upload was already completed - return success
+          console.log(
+            `Upload ${uploadId} already completed, file exists in S3`
+          );
+          return {
+            fileUrl:
+              config.aws.endpoint ||
+              `https://${this.bucket}.s3.${config.aws.region}.amazonaws.com/${fileKey}`,
+            fileKey,
+            etag: headResponse.ETag?.replace(/"/g, "") || "",
+          };
+        } catch (headError: any) {
+          // File doesn't exist - upload was aborted, expired, or never completed
+          console.warn(
+            `Upload ${uploadId} does not exist and file ${fileKey} not found. Upload may have expired or been aborted.`
+          );
+          // If we have parts from client, try to complete with those parts anyway
+          // This handles race conditions where S3 hasn't fully registered the upload yet
+          if (parts.length > 0) {
+            console.log(
+              `Attempting to complete upload with ${parts.length} parts from client (fallback)...`
+            );
+            // Try to complete with client parts - S3 might accept it if upload just completed
+            const partsToComplete = parts
+              .map((p) => ({
+                PartNumber: p.partNumber,
+                ETag: p.etag,
+              }))
+              .sort((a, b) => a.PartNumber - b.PartNumber);
+
+            try {
+              const command = new CompleteMultipartUploadCommand({
+                Bucket: this.bucket,
+                Key: fileKey,
+                UploadId: uploadId,
+                MultipartUpload: {
+                  Parts: partsToComplete,
+                },
+              });
+
+              const response = await this.client.send(command);
+              console.log(
+                `Successfully completed upload with client parts (fallback)`
+              );
+              return {
+                fileUrl:
+                  response.Location ||
+                  config.aws.endpoint ||
+                  `https://${this.bucket}.s3.${config.aws.region}.amazonaws.com/${fileKey}`,
+                fileKey,
+                etag: response.ETag?.replace(/"/g, "") || "",
+              };
+            } catch (completeError: any) {
+              // If completion also fails, the upload is definitely gone
+              console.error(
+                `Failed to complete upload with client parts:`,
+                completeError.message || completeError
+              );
+              throw new Error(
+                `Upload session expired or was aborted. Please start a new upload.`
+              );
+            }
+          }
+          throw new Error(
+            `Upload ${uploadId} does not exist. It may have been aborted, expired, or already completed.`
+          );
+        }
+      }
+      // Re-throw if it's not a NoSuchUpload error
+      console.error(`Error listing uploaded parts:`, error);
+      throw error;
+    }
+
+    // Verify all parts from client exist in S3
+    const actualPartNumbers = new Set(
+      actualUploadedParts.map((p) => p.partNumber)
+    );
+    const clientPartNumbers = new Set(parts.map((p) => p.partNumber));
+
+    console.log(
+      `[completeMultipartUpload] S3 has ${actualUploadedParts.length} parts:`,
+      Array.from(actualPartNumbers).sort()
+    );
+    console.log(
+      `[completeMultipartUpload] Client sent ${parts.length} parts:`,
+      Array.from(clientPartNumbers).sort()
+    );
+
+    // Check if any client parts don't exist in S3
+    const missingParts: number[] = [];
+    for (const part of parts) {
+      if (!actualPartNumbers.has(part.partNumber)) {
+        missingParts.push(part.partNumber);
+      }
+    }
+
+    if (missingParts.length > 0) {
+      // If S3 has more parts than client sent, that's okay - we'll use S3's parts
+      // Only error if client claims parts exist that don't
+      if (actualUploadedParts.length < parts.length) {
+        throw new Error(
+          `Parts ${missingParts.join(
+            ", "
+          )} do not exist in S3. Upload may have been interrupted.`
+        );
+      }
+      // Otherwise, we'll use all parts from S3 (which is more reliable)
+      console.warn(
+        `Client sent parts ${missingParts.join(
+          ", "
+        )} that don't exist in S3, but S3 has ${
+          actualUploadedParts.length
+        } parts. Using all S3 parts.`
+      );
+    }
+
+    // Use ALL parts from S3 (they're the source of truth)
+    // This handles cases where:
+    // 1. Client tracking is incomplete but all parts are uploaded
+    // 2. Client sent partial parts list but S3 has all parts
+    // 3. Edge cases where chunk count doesn't match but bytes are complete
+    const partsToComplete = actualUploadedParts
+      .map((actualPart) => {
+        // Try to use client ETag if available (more reliable), otherwise use S3 ETag
+        const clientPart = parts.find(
+          (p) => p.partNumber === actualPart.partNumber
+        );
+        return {
+          PartNumber: actualPart.partNumber,
+          ETag: clientPart?.etag || actualPart.etag,
+        };
+      })
+      .sort((a, b) => a.PartNumber - b.PartNumber);
+
+    if (partsToComplete.length === 0) {
+      throw new Error("No valid parts found to complete the upload");
+    }
+
+    console.log(
+      `[completeMultipartUpload] Completing upload with ${partsToComplete.length} parts (using all parts from S3)`
+    );
 
     const command = new CompleteMultipartUploadCommand({
       Bucket: this.bucket,
       Key: fileKey,
       UploadId: uploadId,
       MultipartUpload: {
-        Parts: sortedParts.map((part) => ({
-          PartNumber: part.partNumber,
-          ETag: part.etag,
-        })),
+        Parts: partsToComplete,
       },
     });
 
-    const response = await this.client.send(command);
+    let response;
+    try {
+      console.log(
+        `[completeMultipartUpload] Sending CompleteMultipartUploadCommand to S3...`
+      );
+      response = await this.client.send(command);
+      console.log(
+        `[completeMultipartUpload] Successfully completed upload, response received`
+      );
+    } catch (error: any) {
+      console.error(
+        `[completeMultipartUpload] Error completing upload:`,
+        error.name || error.Code || error.message
+      );
+      // If completion fails, provide more context
+      if (error.name === "NoSuchUpload" || error.Code === "NoSuchUpload") {
+        throw new Error(
+          `Upload ${uploadId} no longer exists. It may have been completed, aborted, or expired.`
+        );
+      }
+      throw error;
+    }
 
     return {
       fileUrl:
@@ -199,10 +414,33 @@ class S3Service {
     uploadId: string,
     fileKey: string
   ): Promise<{ partNumber: number; etag: string; size: number }[]> {
+    console.log(
+      `[listUploadedParts] Listing parts for uploadId: ${uploadId}, fileKey: ${fileKey}`
+    );
     const parts: { partNumber: number; etag: string; size: number }[] = [];
     let partNumberMarker: number | undefined;
+    const seenMarkers = new Set<number | undefined>(); // Track seen markers to prevent infinite loops
+    let iterationCount = 0;
+    const maxIterations = 1000; // Safety limit
 
     do {
+      // Safety check to prevent infinite loops
+      if (iterationCount >= maxIterations) {
+        console.error(
+          `[listUploadedParts] Max iterations reached (${maxIterations}), breaking loop`
+        );
+        break;
+      }
+
+      // Check if we've seen this marker before (infinite loop detection)
+      if (seenMarkers.has(partNumberMarker)) {
+        console.warn(
+          `[listUploadedParts] Detected loop with marker ${partNumberMarker}, breaking`
+        );
+        break;
+      }
+      seenMarkers.add(partNumberMarker);
+
       const command = new ListPartsCommand({
         Bucket: this.bucket,
         Key: fileKey,
@@ -210,9 +448,19 @@ class S3Service {
         PartNumberMarker: partNumberMarker,
       });
 
+      console.log(
+        `[listUploadedParts] Sending ListPartsCommand to S3 (marker: ${
+          partNumberMarker || "none"
+        }), iteration: ${iterationCount + 1}`
+      );
       const response = await this.client.send(command);
+      console.log(
+        `[listUploadedParts] Received response, parts: ${
+          response.Parts?.length || 0
+        }, nextMarker: ${response.NextPartNumberMarker || "none"}`
+      );
 
-      if (response.Parts) {
+      if (response.Parts && response.Parts.length > 0) {
         parts.push(
           ...response.Parts.map((part) => ({
             partNumber: part.PartNumber!,
@@ -222,9 +470,34 @@ class S3Service {
         );
       }
 
-      partNumberMarker = response.NextPartNumberMarker;
-    } while (partNumberMarker);
+      // Check if we should continue
+      const hasMoreParts = response.Parts && response.Parts.length > 0;
+      const hasNextMarker = response.NextPartNumberMarker !== undefined;
 
+      // Stop if we got 0 parts (even if there's a next marker, it's likely a bug)
+      if (!hasMoreParts) {
+        console.log(
+          `[listUploadedParts] Got 0 parts, stopping (nextMarker: ${
+            response.NextPartNumberMarker || "none"
+          })`
+        );
+        break;
+      }
+
+      // Stop if there's no next marker
+      if (!hasNextMarker) {
+        console.log(`[listUploadedParts] No next marker, stopping`);
+        break;
+      }
+
+      // Update marker for next iteration
+      partNumberMarker = response.NextPartNumberMarker;
+      iterationCount++;
+    } while (true); // Changed to true since we break explicitly
+
+    console.log(
+      `[listUploadedParts] Total parts found: ${parts.length} after ${iterationCount} iterations`
+    );
     return parts;
   }
 
