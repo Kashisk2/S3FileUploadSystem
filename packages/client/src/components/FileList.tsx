@@ -11,10 +11,12 @@ import {
   RefreshCw,
   ChevronRight,
   FileIcon,
+  Eye,
 } from "lucide-react";
 import { apiService } from "../services/api.service";
 import type { Asset } from "../types";
 import { formatBytes, formatDate, getFileIcon } from "../utils/format";
+import { FilePreview } from "./FilePreview";
 
 interface FileListProps {
   onRefresh?: () => void;
@@ -30,6 +32,7 @@ export const FileList = forwardRef<FileListRef, FileListProps>(
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [currentPage, setCurrentPage] = useState(1);
+    const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
     const [pagination, setPagination] = useState({
       page: 1,
       limit: 50,
@@ -88,13 +91,31 @@ export const FileList = forwardRef<FileListRef, FileListProps>(
       }
     }, [currentPage, pagination.totalPages, fetchAssets]);
 
+    // All files can be previewed
+    const handleView = (asset: Asset, e?: React.MouseEvent) => {
+      e?.stopPropagation(); // Prevent event bubbling
+      e?.preventDefault();
+      console.log(
+        "[FileList] Opening preview for:",
+        asset.name,
+        asset.mimeType
+      );
+      setPreviewAsset(asset);
+    };
+
     const handleDownload = async (asset: Asset) => {
       try {
         const { downloadUrl } = await apiService.getAssetDownloadUrl(
           asset.id,
           "attachment"
         );
-        window.open(downloadUrl, "_blank");
+        // Create a temporary link and trigger download
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = asset.name;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
       } catch (err: any) {
         alert("Failed to download file: " + (err.message || "Unknown error"));
       }
@@ -148,8 +169,16 @@ export const FileList = forwardRef<FileListRef, FileListProps>(
             >
               <div className="text-2xl">{getFileIcon(asset.name)}</div>
 
-              <div className="flex-1 min-w-0">
-                <h3 className="font-medium text-gray-900 truncate">
+              <div
+                className="flex-1 min-w-0 cursor-pointer"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleView(asset, e);
+                }}
+                title={asset ? "Click to preview" : "Click to download"}
+              >
+                <h3 className="font-medium text-gray-900 truncate hover:text-blue-600">
                   {asset.name}
                 </h3>
                 <div className="flex gap-4 text-sm text-gray-500">
@@ -165,14 +194,30 @@ export const FileList = forwardRef<FileListRef, FileListProps>(
 
               <div className="flex gap-2">
                 <button
-                  onClick={() => handleDownload(asset)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleView(asset, e);
+                  }}
+                  className="p-2 rounded-lg hover:bg-green-100 text-green-600 transition-colors"
+                  title="Preview"
+                >
+                  <Eye className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDownload(asset);
+                  }}
                   className="p-2 rounded-lg hover:bg-blue-100 text-blue-600 transition-colors"
                   title="Download"
                 >
                   <Download className="w-5 h-5" />
                 </button>
                 <button
-                  onClick={() => handleDelete(asset)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDelete(asset);
+                  }}
                   className="p-2 rounded-lg hover:bg-red-100 text-red-600 transition-colors"
                   title="Delete"
                 >
@@ -200,6 +245,13 @@ export const FileList = forwardRef<FileListRef, FileListProps>(
           <div className="p-4 border-t text-center text-gray-500">
             Loading...
           </div>
+        )}
+        {/* File Preview Modal */}
+        {previewAsset && (
+          <FilePreview
+            asset={previewAsset}
+            onClose={() => setPreviewAsset(null)}
+          />
         )}
       </div>
     );

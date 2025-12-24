@@ -273,7 +273,8 @@ class AssetService {
     const url = await s3Service.getPresignedDownloadUrl(
       asset.key,
       asset.name,
-      disposition
+      disposition,
+      asset.mimeType || undefined
     );
 
     return {

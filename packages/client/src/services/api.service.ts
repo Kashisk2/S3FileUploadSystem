@@ -238,7 +238,11 @@ export const apiService = {
     const response = await axios.get(
       `${API_BASE_URL}/assets/${assetId}/download?disposition=${disposition}`
     );
-    return response.data;
+    // Server returns { url }, normalize to { downloadUrl } for consistency
+    const data = response.data;
+    return {
+      downloadUrl: data.url || data.downloadUrl,
+    };
   },
 
   /**

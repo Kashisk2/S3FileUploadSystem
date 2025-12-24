@@ -536,17 +536,30 @@ class S3Service {
   async getPresignedDownloadUrl(
     fileKey: string,
     fileName?: string,
-    disposition: "inline" | "attachment" = "attachment"
+    disposition: "inline" | "attachment" = "attachment",
+    contentType?: string
   ): Promise<string> {
-    const responseContentDisposition = fileName
-      ? `${disposition}; filename="${encodeURIComponent(fileName)}"`
-      : disposition;
+    // For inline disposition, don't include filename to allow browser to display
+    // For attachment, include filename to trigger download
+    const responseContentDisposition =
+      disposition === "inline"
+        ? "inline" // Just "inline" without filename for better browser support
+        : fileName
+        ? `attachment; filename="${encodeURIComponent(fileName)}"`
+        : "attachment";
 
-    const command = new GetObjectCommand({
+    const commandParams: any = {
       Bucket: this.bucket,
       Key: fileKey,
       ResponseContentDisposition: responseContentDisposition,
-    });
+    };
+
+    // Add ContentType if provided (helps browser display inline content)
+    if (contentType) {
+      commandParams.ResponseContentType = contentType;
+    }
+
+    const command = new GetObjectCommand(commandParams);
 
     const presignedUrl = await getSignedUrl(this.client, command, {
       expiresIn: config.upload.presignedUrlExpiry,
